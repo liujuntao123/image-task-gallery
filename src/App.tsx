@@ -1,12 +1,62 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
+import { SlidersHorizontal } from "lucide-react";
 import "./App.css";
 import { createImageTask, listTasks, resolveImageUrl } from "./api";
 import { DEFAULT_CONFIG, getDeviceUuid, loadConfig, saveConfig } from "./storage";
 import type { AppConfig, ImageTask, TaskStatus } from "./types";
 
-const SIZE_OPTIONS = ["1024x1024", "1536x1536", "2048x2048"];
-const QUALITY_OPTIONS = ["auto", "high", "medium", "low"];
+type ImageAspectRatio = "1:1" | "4:3" | "3:4" | "16:9" | "9:16";
+type ImageResolution = "1K" | "2K" | "4K";
+
+interface ImageConfig {
+  aspectRatio: ImageAspectRatio;
+  resolution: ImageResolution;
+}
+
+const DEFAULT_IMAGE_CONFIG: ImageConfig = {
+  aspectRatio: "1:1",
+  resolution: "1K"
+};
+
+const ASPECT_RATIO_OPTIONS: Array<{ value: ImageAspectRatio; label: string }> = [
+  { value: "1:1", label: "1:1" },
+  { value: "4:3", label: "4:3" },
+  { value: "3:4", label: "3:4" },
+  { value: "16:9", label: "16:9" },
+  { value: "9:16", label: "9:16" }
+];
+
+const RESOLUTION_OPTIONS: Array<{ value: ImageResolution; label: string }> = [
+  { value: "1K", label: "1K" },
+  { value: "2K", label: "2K" },
+  { value: "4K", label: "4K" }
+];
+
+const IMAGE_SIZE_PRESETS: Record<ImageResolution, Record<ImageAspectRatio, string>> = {
+  "1K": {
+    "1:1": "1024x1024",
+    "4:3": "1152x864",
+    "3:4": "864x1152",
+    "16:9": "1280x720",
+    "9:16": "720x1280"
+  },
+  "2K": {
+    "1:1": "2048x2048",
+    "4:3": "2304x1728",
+    "3:4": "1728x2304",
+    "16:9": "2560x1440",
+    "9:16": "1440x2560"
+  },
+  "4K": {
+    "1:1": "2880x2880",
+    "4:3": "3072x2304",
+    "3:4": "2304x3072",
+    "16:9": "3840x2160",
+    "9:16": "2160x3840"
+  }
+};
+
 const ACTIVE_STATUSES: TaskStatus[] = ["queued", "running"];
 
 function App() {
@@ -14,9 +64,10 @@ function App() {
   const [config, setConfig] = useState<AppConfig>(() => loadConfig());
   const [draftConfig, setDraftConfig] = useState<AppConfig>(() => loadConfig());
   const [isConfigOpen, setIsConfigOpen] = useState(false);
+  const [imageConfig, setImageConfig] = useState<ImageConfig>(DEFAULT_IMAGE_CONFIG);
+  const [draftImageConfig, setDraftImageConfig] = useState<ImageConfig>(DEFAULT_IMAGE_CONFIG);
+  const [isImageConfigOpen, setIsImageConfigOpen] = useState(false);
   const [prompt, setPrompt] = useState("");
-  const [size, setSize] = useState("1024x1024");
-  const [quality, setQuality] = useState("auto");
   const [tasks, setTasks] = useState<ImageTask[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -72,6 +123,17 @@ function App() {
     setIsConfigOpen(true);
   }
 
+  function openImageConfig() {
+    setDraftImageConfig(imageConfig);
+    setIsImageConfigOpen(true);
+  }
+
+  function submitImageConfig(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setImageConfig(draftImageConfig);
+    setIsImageConfigOpen(false);
+  }
+
   function submitConfig(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const nextConfig = {
@@ -109,8 +171,7 @@ function App() {
     try {
       await createImageTask({
         prompt: finalPrompt,
-        size,
-        quality,
+        size: resolveImageSize(imageConfig),
         uuid: deviceUuid,
         config
       });
@@ -138,8 +199,8 @@ function App() {
           <button className="ghost-button" type="button" onClick={() => void refreshTasks()}>
             刷新
           </button>
-          <button className="icon-button" type="button" aria-label="打开配置" onClick={openConfig}>
-            ⚙
+          <button className="ghost-button" type="button" onClick={openConfig}>
+            配置
           </button>
         </div>
       </header>
@@ -168,34 +229,92 @@ function App() {
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
           placeholder="描述你想生成的图片"
-          rows={2}
+          rows={4}
         />
         <div className="composer-controls">
-          <label>
-            尺寸
-            <select value={size} onChange={(event) => setSize(event.target.value)}>
-              {SIZE_OPTIONS.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            质量
-            <select value={quality} onChange={(event) => setQuality(event.target.value)}>
-              {QUALITY_OPTIONS.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
-          </label>
+          <button
+            className="image-config-trigger"
+            type="button"
+            onClick={openImageConfig}
+            aria-label={`图片配置，当前分辨率 ${resolveImageSize(imageConfig)}`}
+          >
+            <SlidersHorizontal size={16} strokeWidth={2} aria-hidden="true" />
+            <strong>{resolveImageSize(imageConfig)}</strong>
+          </button>
           <button className="primary-button" type="submit" disabled={isSubmitting}>
             {isSubmitting ? "提交中" : "生成"}
           </button>
         </div>
       </form>
+
+      {isImageConfigOpen ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setIsImageConfigOpen(false)}>
+          <form
+            className="config-modal image-config-modal"
+            onSubmit={submitImageConfig}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="modal-title">
+              <div>
+                <h2>图片配置</h2>
+                <p>{imageConfigSummary(draftImageConfig)}</p>
+              </div>
+              <button type="button" className="ghost-button" onClick={() => setIsImageConfigOpen(false)}>
+                关闭
+              </button>
+            </div>
+
+            <fieldset className="option-group">
+              <legend>比例</legend>
+              <div className="option-grid">
+                {ASPECT_RATIO_OPTIONS.map((option) => (
+                  <button
+                    aria-pressed={draftImageConfig.aspectRatio === option.value}
+                    className="option-button"
+                    key={option.value}
+                    onClick={() =>
+                      setDraftImageConfig((current) => ({ ...current, aspectRatio: option.value }))
+                    }
+                    type="button"
+                  >
+                    <span>{option.label}</span>
+                    <small>{resolveImageSize({ ...draftImageConfig, aspectRatio: option.value })}</small>
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+
+            <fieldset className="option-group">
+              <legend>分辨率</legend>
+              <div className="option-grid">
+                {RESOLUTION_OPTIONS.map((option) => (
+                  <button
+                    aria-pressed={draftImageConfig.resolution === option.value}
+                    className="option-button"
+                    key={option.value}
+                    onClick={() =>
+                      setDraftImageConfig((current) => ({ ...current, resolution: option.value }))
+                    }
+                    type="button"
+                  >
+                    <span>{option.label}</span>
+                    <small>{resolveImageSize({ ...draftImageConfig, resolution: option.value })}</small>
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+
+            <div className="modal-actions">
+              <button type="button" className="ghost-button" onClick={() => setDraftImageConfig(DEFAULT_IMAGE_CONFIG)}>
+                恢复默认
+              </button>
+              <button type="submit" className="primary-button">
+                保存配置
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
 
       {isConfigOpen ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={() => setIsConfigOpen(false)}>
@@ -205,8 +324,8 @@ function App() {
                 <h2>生成配置</h2>
                 <p>保存在当前浏览器，不会同步到服务端。</p>
               </div>
-              <button type="button" className="icon-button" aria-label="关闭配置" onClick={() => setIsConfigOpen(false)}>
-                ×
+              <button type="button" className="ghost-button" onClick={() => setIsConfigOpen(false)}>
+                关闭
               </button>
             </div>
 
@@ -378,6 +497,14 @@ function compactUrl(value: string): string {
   } catch {
     return value || "未配置";
   }
+}
+
+function resolveImageSize(config: ImageConfig): string {
+  return IMAGE_SIZE_PRESETS[config.resolution][config.aspectRatio];
+}
+
+function imageConfigSummary(config: ImageConfig): string {
+  return `${config.aspectRatio} · ${config.resolution} · ${resolveImageSize(config)}`;
 }
 
 function shortUuid(value: string): string {

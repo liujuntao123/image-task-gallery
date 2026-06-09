@@ -5,7 +5,7 @@ Frontend companion for `image-task-worker`.
 ## Features
 
 - Gallery homepage for the current browser/device UUID.
-- Floating prompt composer with image size and quality controls.
+- Floating prompt composer with image configuration summary and modal controls for aspect ratio and resolution.
 - Configuration modal for `imageType`, Worker URL, target image API URL, key, and model.
 - Browser-local device UUID and configuration persistence.
 - Real task creation through the deployed Worker.

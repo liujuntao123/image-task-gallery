@@ -4,7 +4,6 @@ import { trimTrailingSlash } from "./storage";
 interface CreateImageTaskInput {
   prompt: string;
   size: string;
-  quality: string;
   uuid: string;
   config: AppConfig;
 }
@@ -31,7 +30,7 @@ export async function createImageTask(input: CreateImageTaskInput): Promise<Crea
     model: input.config.model,
     prompt: input.prompt,
     size: input.size,
-    quality: input.quality
+    quality: "auto"
   };
 
   const response = await fetch(`${baseUrl}/tasks`, {
