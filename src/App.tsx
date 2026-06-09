@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent } from "react";
-import { SlidersHorizontal } from "lucide-react";
+import type { ChangeEvent, FormEvent } from "react";
+import { ImagePlus, SlidersHorizontal, X } from "lucide-react";
 import "./App.css";
 import { createImageTask, deleteImageTask, listTasks, resolveImageUrl } from "./api";
 import { DEFAULT_CONFIG, getDeviceUuid, loadConfig, saveConfig } from "./storage";
-import type { AppConfig, ImageTask, TaskStatus } from "./types";
+import type { AppConfig, ImageTask, ReferenceImagePayload, TaskStatus } from "./types";
 
 type ImageAspectRatio = "1:1" | "4:3" | "3:4" | "16:9" | "9:16";
 type ImageResolution = "1K" | "2K" | "4K";
@@ -58,6 +58,11 @@ const IMAGE_SIZE_PRESETS: Record<ImageResolution, Record<ImageAspectRatio, strin
 };
 
 const ACTIVE_STATUSES: TaskStatus[] = ["queued", "running"];
+const MAX_REFERENCE_IMAGES = 16;
+
+interface ReferenceImage extends ReferenceImagePayload {
+  id: string;
+}
 
 function App() {
   const [deviceUuid] = useState(() => getDeviceUuid());
@@ -68,6 +73,7 @@ function App() {
   const [draftImageConfig, setDraftImageConfig] = useState<ImageConfig>(DEFAULT_IMAGE_CONFIG);
   const [isImageConfigOpen, setIsImageConfigOpen] = useState(false);
   const [prompt, setPrompt] = useState("");
+  const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([]);
   const [tasks, setTasks] = useState<ImageTask[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -76,6 +82,7 @@ function App() {
   const [deleteCandidate, setDeleteCandidate] = useState<ImageTask | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const referenceFileInputRef = useRef<HTMLInputElement>(null);
   const isTaskListRequestInFlight = useRef(false);
 
   const hasActiveTasks = useMemo(() => tasks.some((task) => ACTIVE_STATUSES.includes(task.status)), [tasks]);
@@ -189,10 +196,12 @@ function App() {
       await createImageTask({
         prompt: finalPrompt,
         size: resolveImageSize(imageConfig),
+        inputImages: referenceImages.map(({ dataUrl, filename }) => ({ dataUrl, filename })),
         uuid: deviceUuid,
         config
       });
       setPrompt("");
+      setReferenceImages([]);
       setNotice("任务已创建，正在生成");
       await refreshTasks();
     } catch (submitError) {
@@ -205,6 +214,67 @@ function App() {
   function requestDeleteTask(task: ImageTask) {
     if (deletingTaskId) return;
     setDeleteCandidate(task);
+  }
+
+  async function addReferenceFiles(files: FileList | File[]) {
+    const remaining = MAX_REFERENCE_IMAGES - referenceImages.length;
+    if (remaining <= 0) {
+      setError(`最多添加 ${MAX_REFERENCE_IMAGES} 张参考图`);
+      return;
+    }
+
+    const imageFiles = Array.from(files).filter((file) => file.type.startsWith("image/")).slice(0, remaining);
+    if (imageFiles.length === 0) return;
+
+    try {
+      const nextImages = await Promise.all(
+        imageFiles.map(async (file) => ({
+          id: crypto.randomUUID(),
+          filename: file.name || "reference.png",
+          dataUrl: await fileToDataUrl(file)
+        }))
+      );
+      setReferenceImages((current) => [...current, ...nextImages]);
+      setError(null);
+    } catch (fileError) {
+      setError(errorMessage(fileError));
+    }
+  }
+
+  function handleReferenceFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const files = event.target.files;
+    if (files) void addReferenceFiles(files);
+    event.target.value = "";
+  }
+
+  async function addTaskResultAsReference(task: ImageTask) {
+    const resultUrl = task.resultUrls[0] ? resolveImageUrl(config.workerUrl, task.resultUrls[0]) : null;
+    if (!resultUrl) return;
+    if (referenceImages.length >= MAX_REFERENCE_IMAGES) {
+      setError(`最多添加 ${MAX_REFERENCE_IMAGES} 张参考图`);
+      return;
+    }
+
+    try {
+      const dataUrl = await fetchImageAsDataUrl(resultUrl);
+      setReferenceImages((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          filename: `${task.id}.png`,
+          dataUrl
+        }
+      ]);
+      setPrompt((current) => current || task.prompt);
+      setNotice("已加入参考图，可以继续描述修改要求");
+      setError(null);
+    } catch (referenceError) {
+      setError(errorMessage(referenceError));
+    }
+  }
+
+  function removeReferenceImage(id: string) {
+    setReferenceImages((current) => current.filter((image) => image.id !== id));
   }
 
   async function confirmDeleteTask() {
@@ -273,6 +343,7 @@ function App() {
               isRefreshing={isRefreshing}
               key={task.id}
               onDelete={() => requestDeleteTask(task)}
+              onEdit={() => void addTaskResultAsReference(task)}
               onRefresh={() => void refreshTasks({ showLoading: true })}
               task={task}
               workerUrl={config.workerUrl}
@@ -281,13 +352,42 @@ function App() {
       </section>
 
       <form className="composer" onSubmit={(event) => void submitTask(event)}>
+        {referenceImages.length > 0 ? (
+          <div className="reference-strip" aria-label="参考图">
+            {referenceImages.map((image, index) => (
+              <div className="reference-thumb" key={image.id}>
+                <img src={image.dataUrl} alt={`参考图 ${index + 1}`} />
+                <button type="button" onClick={() => removeReferenceImage(image.id)} aria-label={`移除参考图 ${index + 1}`}>
+                  <X size={13} strokeWidth={2.3} aria-hidden="true" />
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
         <textarea
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
-          placeholder="描述你想生成的图片"
+          placeholder={referenceImages.length > 0 ? "描述你想如何修改参考图" : "描述你想生成的图片"}
           rows={4}
         />
         <div className="composer-controls">
+          <input
+            accept="image/*"
+            multiple
+            onChange={handleReferenceFileChange}
+            ref={referenceFileInputRef}
+            type="file"
+          />
+          <button
+            className="image-config-trigger"
+            disabled={isSubmitting || referenceImages.length >= MAX_REFERENCE_IMAGES}
+            type="button"
+            onClick={() => referenceFileInputRef.current?.click()}
+            aria-label="添加参考图"
+          >
+            <ImagePlus size={16} strokeWidth={2} aria-hidden="true" />
+            <strong>参考图 {referenceImages.length}</strong>
+          </button>
           <button
             className="image-config-trigger"
             disabled={isSubmitting}
@@ -494,10 +594,11 @@ interface TaskCardProps {
   isDeleting: boolean;
   isRefreshing: boolean;
   onDelete: () => void;
+  onEdit: () => void;
   onRefresh: () => void;
 }
 
-function TaskCard({ task, workerUrl, isDeleting, isRefreshing, onDelete, onRefresh }: TaskCardProps) {
+function TaskCard({ task, workerUrl, isDeleting, isRefreshing, onDelete, onEdit, onRefresh }: TaskCardProps) {
   const firstImageUrl = task.resultUrls[0] ? resolveImageUrl(workerUrl, task.resultUrls[0]) : null;
   const elapsed = formatElapsed(task.startedAt, task.completedAt ?? task.failedAt);
 
@@ -530,6 +631,9 @@ function TaskCard({ task, workerUrl, isDeleting, isRefreshing, onDelete, onRefre
               <a href={firstImageUrl} download={`${task.id}.png`}>
                 下载
               </a>
+              <button disabled={isDeleting || isRefreshing} type="button" onClick={onEdit}>
+                修改
+              </button>
             </>
           ) : null}
           {task.status === "failed" ? (
@@ -612,6 +716,29 @@ function resolveImageSize(config: ImageConfig): string {
 
 function imageConfigSummary(config: ImageConfig): string {
   return `${config.aspectRatio} · ${config.resolution} · ${resolveImageSize(config)}`;
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("参考图读取失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function fetchImageAsDataUrl(url: string): Promise<string> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`参考图读取失败：${response.status}`);
+  }
+
+  const blob = await response.blob();
+  if (!blob.type.startsWith("image/")) {
+    throw new Error("结果不是可用图片");
+  }
+
+  return fileToDataUrl(new File([blob], "reference.png", { type: blob.type }));
 }
 
 function shortUuid(value: string): string {

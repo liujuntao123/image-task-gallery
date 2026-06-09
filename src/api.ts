@@ -1,9 +1,10 @@
-import type { AppConfig, CreateTaskResponse, ImageTask, TaskListResponse } from "./types";
+import type { AppConfig, CreateTaskResponse, ImageTask, ReferenceImagePayload, TaskListResponse } from "./types";
 import { trimTrailingSlash } from "./storage";
 
 interface CreateImageTaskInput {
   prompt: string;
   size: string;
+  inputImages: ReferenceImagePayload[];
   uuid: string;
   config: AppConfig;
 }
@@ -43,6 +44,7 @@ export async function createImageTask(input: CreateImageTaskInput): Promise<Crea
       url: input.config.targetUrl,
       key: input.config.apiKey,
       payload,
+      inputImages: input.inputImages,
       uuid: input.uuid,
       maxAttempts: 1
     })

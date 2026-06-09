@@ -35,6 +35,11 @@ export interface ImageTask {
   updatedAt: string;
 }
 
+export interface ReferenceImagePayload {
+  dataUrl: string;
+  filename: string;
+}
+
 export interface TaskListResponse {
   tasks: ImageTask[];
   pagination: {
