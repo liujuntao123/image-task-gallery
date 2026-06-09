@@ -55,6 +55,20 @@ export async function createImageTask(input: CreateImageTaskInput): Promise<Crea
   return (await response.json()) as CreateTaskResponse;
 }
 
+export async function deleteImageTask(workerUrl: string, taskId: string, uuid: string): Promise<void> {
+  const baseUrl = trimTrailingSlash(workerUrl);
+  const response = await fetch(`${baseUrl}/tasks/${encodeURIComponent(taskId)}?uuid=${encodeURIComponent(uuid)}`, {
+    method: "DELETE",
+    headers: {
+      Accept: "application/json"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`任务删除失败：${response.status} ${await safeText(response)}`);
+  }
+}
+
 export function resolveImageUrl(workerUrl: string, resultUrl: string): string {
   if (resultUrl.startsWith("http://") || resultUrl.startsWith("https://")) {
     return resultUrl;

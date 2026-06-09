@@ -31,6 +31,7 @@ export interface ImageTask {
   startedAt: string | null;
   completedAt: string | null;
   failedAt: string | null;
+  deletedAt?: string | null;
   updatedAt: string;
 }
 

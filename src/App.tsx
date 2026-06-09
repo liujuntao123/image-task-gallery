@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { SlidersHorizontal } from "lucide-react";
 import "./App.css";
-import { createImageTask, listTasks, resolveImageUrl } from "./api";
+import { createImageTask, deleteImageTask, listTasks, resolveImageUrl } from "./api";
 import { DEFAULT_CONFIG, getDeviceUuid, loadConfig, saveConfig } from "./storage";
 import type { AppConfig, ImageTask, TaskStatus } from "./types";
 
@@ -70,15 +70,42 @@ function App() {
   const [prompt, setPrompt] = useState("");
   const [tasks, setTasks] = useState<ImageTask[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
+  const [deleteCandidate, setDeleteCandidate] = useState<ImageTask | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const isTaskListRequestInFlight = useRef(false);
 
   const hasActiveTasks = useMemo(() => tasks.some((task) => ACTIVE_STATUSES.includes(task.status)), [tasks]);
+
+  const refreshTasks = useCallback(
+    async (options: { showLoading?: boolean } = {}) => {
+      if (isTaskListRequestInFlight.current) return;
+
+      isTaskListRequestInFlight.current = true;
+      if (options.showLoading) setIsRefreshing(true);
+
+      try {
+        const nextTasks = await listTasks(config.workerUrl, deviceUuid);
+        setTasks(nextTasks);
+        setError(null);
+      } catch (refreshError) {
+        setError(errorMessage(refreshError));
+      } finally {
+        setIsLoading(false);
+        if (options.showLoading) setIsRefreshing(false);
+        isTaskListRequestInFlight.current = false;
+      }
+    },
+    [config.workerUrl, deviceUuid]
+  );
 
   useEffect(() => {
     let isMounted = true;
     async function loadInitialTasks() {
+      setIsLoading(true);
       try {
         const initialTasks = await listTasks(config.workerUrl, deviceUuid);
         if (!isMounted) return;
@@ -96,18 +123,6 @@ function App() {
     return () => {
       isMounted = false;
     };
-  }, [config.workerUrl, deviceUuid]);
-
-  const refreshTasks = useCallback(async () => {
-    try {
-      const nextTasks = await listTasks(config.workerUrl, deviceUuid);
-      setTasks(nextTasks);
-      setError(null);
-    } catch (refreshError) {
-      setError(errorMessage(refreshError));
-    } finally {
-      setIsLoading(false);
-    }
   }, [config.workerUrl, deviceUuid]);
 
   useEffect(() => {
@@ -152,6 +167,8 @@ function App() {
 
   async function submitTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (isSubmitting) return;
+
     const finalPrompt = prompt.trim();
     if (!config.apiKey) {
       setNotice(null);
@@ -185,6 +202,32 @@ function App() {
     }
   }
 
+  function requestDeleteTask(task: ImageTask) {
+    if (deletingTaskId) return;
+    setDeleteCandidate(task);
+  }
+
+  async function confirmDeleteTask() {
+    if (!deleteCandidate || deletingTaskId) return;
+
+    const task = deleteCandidate;
+
+    setDeletingTaskId(task.id);
+    setError(null);
+    setNotice(null);
+
+    try {
+      await deleteImageTask(config.workerUrl, task.id, deviceUuid);
+      setTasks((currentTasks) => currentTasks.filter((currentTask) => currentTask.id !== task.id));
+      setDeleteCandidate(null);
+      setNotice("任务已删除");
+    } catch (deleteError) {
+      setError(errorMessage(deleteError));
+    } finally {
+      setDeletingTaskId(null);
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -196,8 +239,13 @@ function App() {
           </div>
         </div>
         <div className="topbar-actions">
-          <button className="ghost-button" type="button" onClick={() => void refreshTasks()}>
-            刷新
+          <button
+            className="ghost-button"
+            disabled={isRefreshing}
+            type="button"
+            onClick={() => void refreshTasks({ showLoading: true })}
+          >
+            {isRefreshing ? "刷新中" : "刷新"}
           </button>
           <button className="ghost-button" type="button" onClick={openConfig}>
             配置
@@ -220,7 +268,15 @@ function App() {
         {!isLoading && tasks.length === 0 ? <EmptyState onConfigure={openConfig} /> : null}
         {!isLoading &&
           tasks.map((task) => (
-            <TaskCard key={task.id} task={task} workerUrl={config.workerUrl} onRefresh={() => void refreshTasks()} />
+            <TaskCard
+              isDeleting={deletingTaskId === task.id}
+              isRefreshing={isRefreshing}
+              key={task.id}
+              onDelete={() => requestDeleteTask(task)}
+              onRefresh={() => void refreshTasks({ showLoading: true })}
+              task={task}
+              workerUrl={config.workerUrl}
+            />
           ))}
       </section>
 
@@ -234,6 +290,7 @@ function App() {
         <div className="composer-controls">
           <button
             className="image-config-trigger"
+            disabled={isSubmitting}
             type="button"
             onClick={openImageConfig}
             aria-label={`图片配置，当前分辨率 ${resolveImageSize(imageConfig)}`}
@@ -383,6 +440,50 @@ function App() {
           </form>
         </div>
       ) : null}
+
+      {deleteCandidate ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={() => {
+            if (!deletingTaskId) setDeleteCandidate(null);
+          }}
+        >
+          <div
+            aria-labelledby="delete-task-title"
+            aria-modal="true"
+            className="confirm-modal"
+            onMouseDown={(event) => event.stopPropagation()}
+            role="dialog"
+          >
+            <div className="modal-title">
+              <div>
+                <h2 id="delete-task-title">删除任务</h2>
+                <p>删除后将移除任务记录和已生成图片。</p>
+              </div>
+            </div>
+            <p className="confirm-body">{deleteCandidate.prompt}</p>
+            <div className="modal-actions">
+              <button
+                className="ghost-button"
+                disabled={Boolean(deletingTaskId)}
+                type="button"
+                onClick={() => setDeleteCandidate(null)}
+              >
+                取消
+              </button>
+              <button
+                className="danger-button"
+                disabled={Boolean(deletingTaskId)}
+                type="button"
+                onClick={() => void confirmDeleteTask()}
+              >
+                {deletingTaskId ? "删除中" : "确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -390,10 +491,13 @@ function App() {
 interface TaskCardProps {
   task: ImageTask;
   workerUrl: string;
+  isDeleting: boolean;
+  isRefreshing: boolean;
+  onDelete: () => void;
   onRefresh: () => void;
 }
 
-function TaskCard({ task, workerUrl, onRefresh }: TaskCardProps) {
+function TaskCard({ task, workerUrl, isDeleting, isRefreshing, onDelete, onRefresh }: TaskCardProps) {
   const firstImageUrl = task.resultUrls[0] ? resolveImageUrl(workerUrl, task.resultUrls[0]) : null;
   const elapsed = formatElapsed(task.startedAt, task.completedAt ?? task.failedAt);
 
@@ -429,10 +533,13 @@ function TaskCard({ task, workerUrl, onRefresh }: TaskCardProps) {
             </>
           ) : null}
           {task.status === "failed" ? (
-            <button type="button" onClick={onRefresh}>
-              重新检查
+            <button disabled={isRefreshing || isDeleting} type="button" onClick={onRefresh}>
+              {isRefreshing ? "检查中" : "重新检查"}
             </button>
           ) : null}
+          <button className="danger-action" disabled={isDeleting || isRefreshing} type="button" onClick={onDelete}>
+            {isDeleting ? "删除中" : "删除"}
+          </button>
         </div>
       </div>
     </article>

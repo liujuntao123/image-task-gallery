@@ -102,7 +102,7 @@ a {
 }
 
 .icon-button:hover,
-.ghost-button:hover {
+.ghost-button:hover:not(:disabled) {
   background: var(--color-surface);
   border-color: var(--color-border-strong);
   box-shadow: 0 8px 22px rgba(23, 32, 28, 0.07);
@@ -123,7 +123,10 @@ a {
   box-shadow: 0 10px 24px rgba(47, 111, 94, 0.22);
 }
 
-.primary-button:disabled {
+.ghost-button:disabled,
+.primary-button:disabled,
+.danger-button:disabled,
+.image-config-trigger:disabled {
   cursor: not-allowed;
   opacity: 0.62;
 }
@@ -317,11 +320,25 @@ textarea:focus-visible {
   text-decoration: none;
 }
 
+.task-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
 .task-actions a:hover,
-.task-actions button:hover {
+.task-actions button:hover:not(:disabled) {
   color: var(--color-accent-hover);
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+
+.task-actions .danger-action {
+  color: var(--color-danger);
+  margin-left: auto;
+}
+
+.task-actions .danger-action:hover:not(:disabled) {
+  color: #8f2e2e;
 }
 
 .empty-state {
@@ -427,7 +444,7 @@ textarea:focus-visible {
     box-shadow 160ms ease;
 }
 
-.image-config-trigger:hover {
+.image-config-trigger:hover:not(:disabled) {
   background: var(--color-surface);
   border-color: var(--color-border-strong);
   box-shadow: 0 8px 22px rgba(23, 32, 28, 0.07);
@@ -497,7 +514,8 @@ textarea:focus-visible {
   z-index: 30;
 }
 
-.config-modal {
+.config-modal,
+.confirm-modal {
   background: var(--color-surface);
   border: 1px solid rgba(223, 230, 225, 0.92);
   border-radius: var(--radius-xl);
@@ -507,6 +525,27 @@ textarea:focus-visible {
   max-width: 560px;
   padding: 22px;
   width: min(100%, 560px);
+}
+
+.confirm-modal {
+  max-width: 460px;
+  width: min(100%, 460px);
+}
+
+.confirm-body {
+  background: #f6f8f6;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  display: -webkit-box;
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 0;
+  max-height: 92px;
+  overflow: hidden;
+  padding: 11px 12px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
 
 .modal-title {
@@ -534,6 +573,32 @@ textarea:focus-visible {
   gap: 10px;
   justify-content: flex-end;
   margin-top: 4px;
+}
+
+.danger-button {
+  align-items: center;
+  background: var(--color-danger);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-md);
+  color: #ffffff;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 14px;
+  font-weight: 650;
+  justify-content: center;
+  min-height: 42px;
+  padding: 0 18px;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    color 160ms ease;
+}
+
+.danger-button:hover:not(:disabled) {
+  background: #8f2e2e;
+  border-color: #8f2e2e;
+  box-shadow: 0 10px 24px rgba(164, 59, 59, 0.2);
 }
 
 .image-config-modal {
