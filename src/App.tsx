@@ -644,14 +644,13 @@ function App() {
             aria-label="查看图片"
             aria-modal="true"
             className="preview-modal"
-            onMouseDown={(event) => event.stopPropagation()}
             role="dialog"
           >
             <button className="preview-close" type="button" onClick={() => setImagePreview(null)} aria-label="关闭预览">
               <X size={22} strokeWidth={2.2} aria-hidden="true" />
             </button>
-            <img src={imagePreview.url} alt={imagePreview.alt} />
-            <div className="preview-caption">
+            <img src={imagePreview.url} alt={imagePreview.alt} onMouseDown={(event) => event.stopPropagation()} />
+            <div className="preview-caption" onMouseDown={(event) => event.stopPropagation()}>
               <p>{imagePreview.prompt}</p>
               <a href={imagePreview.url} target="_blank" rel="noreferrer">
                 打开原图
