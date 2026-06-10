@@ -8,15 +8,18 @@ import type { AppConfig, ImageTask, ReferenceImagePayload, TaskStatus } from "./
 
 type ImageAspectRatio = "1:1" | "4:3" | "3:4" | "16:9" | "9:16";
 type ImageResolution = "1K" | "2K" | "4K";
+type ImageQuality = "low" | "medium" | "high";
 
 interface ImageConfig {
   aspectRatio: ImageAspectRatio;
   resolution: ImageResolution;
+  quality: ImageQuality;
 }
 
 const DEFAULT_IMAGE_CONFIG: ImageConfig = {
   aspectRatio: "1:1",
-  resolution: "1K"
+  resolution: "1K",
+  quality: "high"
 };
 
 const ASPECT_RATIO_OPTIONS: Array<{ value: ImageAspectRatio; label: string }> = [
@@ -31,6 +34,12 @@ const RESOLUTION_OPTIONS: Array<{ value: ImageResolution; label: string }> = [
   { value: "1K", label: "1K" },
   { value: "2K", label: "2K" },
   { value: "4K", label: "4K" }
+];
+
+const QUALITY_OPTIONS: Array<{ value: ImageQuality; label: string; description: string }> = [
+  { value: "low", label: "Low", description: "更快" },
+  { value: "medium", label: "Medium", description: "均衡" },
+  { value: "high", label: "High", description: "默认" }
 ];
 
 const IMAGE_SIZE_PRESETS: Record<ImageResolution, Record<ImageAspectRatio, string>> = {
@@ -64,6 +73,12 @@ interface ReferenceImage extends ReferenceImagePayload {
   id: string;
 }
 
+interface ImagePreview {
+  url: string;
+  alt: string;
+  prompt: string;
+}
+
 function App() {
   const [deviceUuid] = useState(() => getDeviceUuid());
   const [config, setConfig] = useState<AppConfig>(() => loadConfig());
@@ -80,6 +95,7 @@ function App() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [deleteCandidate, setDeleteCandidate] = useState<ImageTask | null>(null);
+  const [imagePreview, setImagePreview] = useState<ImagePreview | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const referenceFileInputRef = useRef<HTMLInputElement>(null);
@@ -140,6 +156,23 @@ function App() {
     return () => window.clearInterval(timer);
   }, [hasActiveTasks, refreshTasks]);
 
+  useEffect(() => {
+    if (!imagePreview) return undefined;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setImagePreview(null);
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [imagePreview]);
+
   function openConfig() {
     setDraftConfig(config);
     setIsConfigOpen(true);
@@ -196,6 +229,7 @@ function App() {
       await createImageTask({
         prompt: finalPrompt,
         size: resolveImageSize(imageConfig),
+        quality: imageConfig.quality,
         inputImages: referenceImages.map(({ dataUrl, filename }) => ({ dataUrl, filename })),
         uuid: deviceUuid,
         config
@@ -344,6 +378,7 @@ function App() {
               key={task.id}
               onDelete={() => requestDeleteTask(task)}
               onEdit={() => void addTaskResultAsReference(task)}
+              onPreview={(preview) => setImagePreview(preview)}
               onRefresh={() => void refreshTasks({ showLoading: true })}
               task={task}
               workerUrl={config.workerUrl}
@@ -396,7 +431,7 @@ function App() {
             aria-label={`图片配置，当前分辨率 ${resolveImageSize(imageConfig)}`}
           >
             <SlidersHorizontal size={16} strokeWidth={2} aria-hidden="true" />
-            <strong>{resolveImageSize(imageConfig)}</strong>
+            <strong>{imageConfigButtonText(imageConfig)}</strong>
           </button>
           <button className="primary-button" type="submit" disabled={isSubmitting}>
             {isSubmitting ? "提交中" : "生成"}
@@ -456,6 +491,24 @@ function App() {
                   >
                     <span>{option.label}</span>
                     <small>{resolveImageSize({ ...draftImageConfig, resolution: option.value })}</small>
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+
+            <fieldset className="option-group">
+              <legend>质量</legend>
+              <div className="option-grid quality-grid">
+                {QUALITY_OPTIONS.map((option) => (
+                  <button
+                    aria-pressed={draftImageConfig.quality === option.value}
+                    className="option-button"
+                    key={option.value}
+                    onClick={() => setDraftImageConfig((current) => ({ ...current, quality: option.value }))}
+                    type="button"
+                  >
+                    <span>{option.label}</span>
+                    <small>{option.description}</small>
                   </button>
                 ))}
               </div>
@@ -584,6 +637,29 @@ function App() {
           </div>
         </div>
       ) : null}
+
+      {imagePreview ? (
+        <div className="preview-backdrop" role="presentation" onMouseDown={() => setImagePreview(null)}>
+          <div
+            aria-label="查看图片"
+            aria-modal="true"
+            className="preview-modal"
+            onMouseDown={(event) => event.stopPropagation()}
+            role="dialog"
+          >
+            <button className="preview-close" type="button" onClick={() => setImagePreview(null)} aria-label="关闭预览">
+              <X size={22} strokeWidth={2.2} aria-hidden="true" />
+            </button>
+            <img src={imagePreview.url} alt={imagePreview.alt} />
+            <div className="preview-caption">
+              <p>{imagePreview.prompt}</p>
+              <a href={imagePreview.url} target="_blank" rel="noreferrer">
+                打开原图
+              </a>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -595,10 +671,11 @@ interface TaskCardProps {
   isRefreshing: boolean;
   onDelete: () => void;
   onEdit: () => void;
+  onPreview: (preview: ImagePreview) => void;
   onRefresh: () => void;
 }
 
-function TaskCard({ task, workerUrl, isDeleting, isRefreshing, onDelete, onEdit, onRefresh }: TaskCardProps) {
+function TaskCard({ task, workerUrl, isDeleting, isRefreshing, onDelete, onEdit, onPreview, onRefresh }: TaskCardProps) {
   const firstImageUrl = task.resultUrls[0] ? resolveImageUrl(workerUrl, task.resultUrls[0]) : null;
   const elapsed = formatElapsed(task.startedAt, task.completedAt ?? task.failedAt);
 
@@ -606,7 +683,14 @@ function TaskCard({ task, workerUrl, isDeleting, isRefreshing, onDelete, onEdit,
     <article className={`task-card task-${task.status}`}>
       <div className="image-frame">
         {firstImageUrl ? (
-          <img src={firstImageUrl} alt={task.prompt} loading="lazy" />
+          <button
+            className="image-preview-trigger"
+            type="button"
+            onClick={() => onPreview({ url: firstImageUrl, alt: task.prompt, prompt: task.prompt })}
+            aria-label="全屏查看图片"
+          >
+            <img src={firstImageUrl} alt={task.prompt} loading="lazy" />
+          </button>
         ) : (
           <div className="placeholder">
             <span>{statusText(task.status)}</span>
@@ -715,7 +799,20 @@ function resolveImageSize(config: ImageConfig): string {
 }
 
 function imageConfigSummary(config: ImageConfig): string {
-  return `${config.aspectRatio} · ${config.resolution} · ${resolveImageSize(config)}`;
+  return `${config.aspectRatio} · ${config.resolution} · ${resolveImageSize(config)} · ${qualityLabel(config.quality)}`;
+}
+
+function imageConfigButtonText(config: ImageConfig): string {
+  return `${resolveImageSize(config)} · ${qualityLabel(config.quality)}`;
+}
+
+function qualityLabel(quality: ImageQuality): string {
+  const text: Record<ImageQuality, string> = {
+    low: "Low",
+    medium: "Medium",
+    high: "High"
+  };
+  return text[quality];
 }
 
 function fileToDataUrl(file: File): Promise<string> {
