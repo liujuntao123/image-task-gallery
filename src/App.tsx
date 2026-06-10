@@ -68,6 +68,8 @@ const IMAGE_SIZE_PRESETS: Record<ImageResolution, Record<ImageAspectRatio, strin
 
 const ACTIVE_STATUSES: TaskStatus[] = ["queued", "running"];
 const MAX_REFERENCE_IMAGES = 16;
+const TASK_CREATED_NOTICE = "任务已创建，正在生成";
+const TASK_CREATED_NOTICE_TIMEOUT_MS = 3500;
 
 interface ReferenceImage extends ReferenceImagePayload {
   id: string;
@@ -157,6 +159,16 @@ function App() {
   }, [hasActiveTasks, refreshTasks]);
 
   useEffect(() => {
+    if (notice !== TASK_CREATED_NOTICE) return undefined;
+
+    const timer = window.setTimeout(() => {
+      setNotice((currentNotice) => (currentNotice === TASK_CREATED_NOTICE ? null : currentNotice));
+    }, TASK_CREATED_NOTICE_TIMEOUT_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  useEffect(() => {
     if (!imagePreview) return undefined;
 
     const previousOverflow = document.body.style.overflow;
@@ -236,7 +248,7 @@ function App() {
       });
       setPrompt("");
       setReferenceImages([]);
-      setNotice("任务已创建，正在生成");
+      setNotice(TASK_CREATED_NOTICE);
       await refreshTasks();
     } catch (submitError) {
       setError(errorMessage(submitError));
