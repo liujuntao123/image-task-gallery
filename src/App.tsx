@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, FormEvent } from "react";
-import { ImagePlus, SlidersHorizontal, X } from "lucide-react";
+import type { ChangeEvent, FormEvent, PointerEvent as ReactPointerEvent } from "react";
+import { Brush, Eraser, ImagePlus, SlidersHorizontal, X } from "lucide-react";
 import "./App.css";
 import { createImageTask, deleteImageTask, listTasks, resolveImageUrl } from "./api";
 import { DEFAULT_CONFIG, getDeviceUuid, loadConfig, saveConfig } from "./storage";
 import type { AppConfig, ImageTask, ReferenceImagePayload, TaskStatus } from "./types";
 
+type AppView = "gallery" | "edit";
+type EditMode = "global" | "masked";
+type MaskTool = "brush" | "eraser";
 type ImageAspectRatio = "1:1" | "4:3" | "3:4" | "16:9" | "9:16";
 type ImageResolution = "1K" | "2K" | "4K";
 type ImageQuality = "low" | "medium" | "high";
@@ -14,6 +17,28 @@ interface ImageConfig {
   aspectRatio: ImageAspectRatio;
   resolution: ImageResolution;
   quality: ImageQuality;
+}
+
+interface ReferenceImage extends ReferenceImagePayload {
+  id: string;
+}
+
+interface MaskDraft {
+  targetImageId: string;
+  dataUrl: string;
+  previewDataUrl: string;
+  coverage: number;
+}
+
+interface ImagePreview {
+  url: string;
+  alt: string;
+  prompt: string;
+}
+
+interface MaskEditorState {
+  image: ReferenceImage;
+  existingMask: MaskDraft | null;
 }
 
 const DEFAULT_IMAGE_CONFIG: ImageConfig = {
@@ -71,26 +96,22 @@ const MAX_REFERENCE_IMAGES = 16;
 const TASK_CREATED_NOTICE = "任务已创建，正在生成";
 const TASK_CREATED_NOTICE_TIMEOUT_MS = 3500;
 
-interface ReferenceImage extends ReferenceImagePayload {
-  id: string;
-}
-
-interface ImagePreview {
-  url: string;
-  alt: string;
-  prompt: string;
-}
-
 function App() {
   const [deviceUuid] = useState(() => getDeviceUuid());
   const [config, setConfig] = useState<AppConfig>(() => loadConfig());
   const [draftConfig, setDraftConfig] = useState<AppConfig>(() => loadConfig());
   const [isConfigOpen, setIsConfigOpen] = useState(false);
+  const [view, setView] = useState<AppView>("gallery");
   const [imageConfig, setImageConfig] = useState<ImageConfig>(DEFAULT_IMAGE_CONFIG);
   const [draftImageConfig, setDraftImageConfig] = useState<ImageConfig>(DEFAULT_IMAGE_CONFIG);
   const [isImageConfigOpen, setIsImageConfigOpen] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([]);
+  const [editPrompt, setEditPrompt] = useState("");
+  const [editImages, setEditImages] = useState<ReferenceImage[]>([]);
+  const [editMode, setEditMode] = useState<EditMode>("global");
+  const [maskDraft, setMaskDraft] = useState<MaskDraft | null>(null);
+  const [maskEditor, setMaskEditor] = useState<MaskEditorState | null>(null);
   const [tasks, setTasks] = useState<ImageTask[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -101,9 +122,11 @@ function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const referenceFileInputRef = useRef<HTMLInputElement>(null);
+  const editFileInputRef = useRef<HTMLInputElement>(null);
   const isTaskListRequestInFlight = useRef(false);
 
   const hasActiveTasks = useMemo(() => tasks.some((task) => ACTIVE_STATUSES.includes(task.status)), [tasks]);
+  const editMaskTarget = editImages.find((image) => image.id === maskDraft?.targetImageId) ?? editImages[0] ?? null;
 
   const refreshTasks = useCallback(
     async (options: { showLoading?: boolean } = {}) => {
@@ -169,13 +192,16 @@ function App() {
   }, [notice]);
 
   useEffect(() => {
-    if (!imagePreview) return undefined;
+    if (!imagePreview && !maskEditor) return undefined;
 
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
 
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setImagePreview(null);
+      if (event.key === "Escape") {
+        setImagePreview(null);
+        setMaskEditor(null);
+      }
     }
 
     window.addEventListener("keydown", handleKeyDown);
@@ -183,7 +209,7 @@ function App() {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [imagePreview]);
+  }, [imagePreview, maskEditor]);
 
   function openConfig() {
     setDraftConfig(config);
@@ -222,12 +248,7 @@ function App() {
     if (isSubmitting) return;
 
     const finalPrompt = prompt.trim();
-    if (!config.apiKey) {
-      setNotice(null);
-      setError("请先在配置里填写 key");
-      setIsConfigOpen(true);
-      return;
-    }
+    if (!ensureConfigured()) return;
     if (!finalPrompt) {
       setError("请输入提示词");
       return;
@@ -242,7 +263,7 @@ function App() {
         prompt: finalPrompt,
         size: resolveImageSize(imageConfig),
         quality: imageConfig.quality,
-        inputImages: referenceImages.map(({ dataUrl, filename }) => ({ dataUrl, filename })),
+        inputImages: referenceImages.map(toPayload),
         uuid: deviceUuid,
         config
       });
@@ -257,15 +278,72 @@ function App() {
     }
   }
 
+  async function submitEditTask(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (isSubmitting) return;
+
+    const finalPrompt = editPrompt.trim();
+    if (!ensureConfigured()) return;
+    if (editImages.length === 0) {
+      setError("请先添加要编辑的图片");
+      return;
+    }
+    if (!finalPrompt) {
+      setError("请输入编辑要求");
+      return;
+    }
+    if (editMode === "masked" && !maskDraft) {
+      setError("局部编辑需要先涂抹遮罩区域");
+      return;
+    }
+
+    setIsSubmitting(true);
+    setError(null);
+    setNotice(null);
+
+    try {
+      const orderedImages = orderImagesForMask(editImages, editMode === "masked" ? maskDraft?.targetImageId : null);
+      await createImageTask({
+        prompt: finalPrompt,
+        size: resolveImageSize(imageConfig),
+        quality: imageConfig.quality,
+        inputImages: orderedImages.map(toPayload),
+        mask: editMode === "masked" && maskDraft ? { dataUrl: maskDraft.dataUrl, filename: "mask.png" } : null,
+        uuid: deviceUuid,
+        config
+      });
+      setEditPrompt("");
+      setMaskDraft(null);
+      setNotice(editMode === "masked" ? "局部编辑任务已创建" : "整体编辑任务已创建");
+      await refreshTasks();
+      setView("gallery");
+    } catch (submitError) {
+      setError(errorMessage(submitError));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  function ensureConfigured(): boolean {
+    if (!config.apiKey) {
+      setNotice(null);
+      setError("请先在配置里填写 key");
+      setIsConfigOpen(true);
+      return false;
+    }
+    return true;
+  }
+
   function requestDeleteTask(task: ImageTask) {
     if (deletingTaskId) return;
     setDeleteCandidate(task);
   }
 
-  async function addReferenceFiles(files: FileList | File[]) {
-    const remaining = MAX_REFERENCE_IMAGES - referenceImages.length;
+  async function addFiles(files: FileList | File[], target: "reference" | "edit") {
+    const currentImages = target === "reference" ? referenceImages : editImages;
+    const remaining = MAX_REFERENCE_IMAGES - currentImages.length;
     if (remaining <= 0) {
-      setError(`最多添加 ${MAX_REFERENCE_IMAGES} 张参考图`);
+      setError(`最多添加 ${MAX_REFERENCE_IMAGES} 张图片`);
       return;
     }
 
@@ -280,7 +358,11 @@ function App() {
           dataUrl: await fileToDataUrl(file)
         }))
       );
-      setReferenceImages((current) => [...current, ...nextImages]);
+      if (target === "reference") {
+        setReferenceImages((current) => [...current, ...nextImages]);
+      } else {
+        setEditImages((current) => [...current, ...nextImages]);
+      }
       setError(null);
     } catch (fileError) {
       setError(errorMessage(fileError));
@@ -289,21 +371,27 @@ function App() {
 
   function handleReferenceFileChange(event: ChangeEvent<HTMLInputElement>) {
     const files = event.target.files;
-    if (files) void addReferenceFiles(files);
+    if (files) void addFiles(files, "reference");
     event.target.value = "";
   }
 
-  async function addTaskResultAsReference(task: ImageTask) {
+  function handleEditFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const files = event.target.files;
+    if (files) void addFiles(files, "edit");
+    event.target.value = "";
+  }
+
+  async function addTaskResultToEditor(task: ImageTask) {
     const resultUrl = task.resultUrls[0] ? resolveImageUrl(config.workerUrl, task.resultUrls[0]) : null;
     if (!resultUrl) return;
-    if (referenceImages.length >= MAX_REFERENCE_IMAGES) {
-      setError(`最多添加 ${MAX_REFERENCE_IMAGES} 张参考图`);
+    if (editImages.length >= MAX_REFERENCE_IMAGES) {
+      setError(`最多添加 ${MAX_REFERENCE_IMAGES} 张图片`);
       return;
     }
 
     try {
       const dataUrl = await fetchImageAsDataUrl(resultUrl);
-      setReferenceImages((current) => [
+      setEditImages((current) => [
         ...current,
         {
           id: crypto.randomUUID(),
@@ -311,8 +399,9 @@ function App() {
           dataUrl
         }
       ]);
-      setPrompt((current) => current || task.prompt);
-      setNotice("已加入参考图，可以继续描述修改要求");
+      setEditPrompt((current) => current || task.prompt);
+      setView("edit");
+      setNotice("已放入图片编辑页");
       setError(null);
     } catch (referenceError) {
       setError(errorMessage(referenceError));
@@ -321,6 +410,11 @@ function App() {
 
   function removeReferenceImage(id: string) {
     setReferenceImages((current) => current.filter((image) => image.id !== id));
+  }
+
+  function removeEditImage(id: string) {
+    setEditImages((current) => current.filter((image) => image.id !== id));
+    setMaskDraft((current) => (current?.targetImageId === id ? null : current));
   }
 
   async function confirmDeleteTask() {
@@ -355,6 +449,14 @@ function App() {
           </div>
         </div>
         <div className="topbar-actions">
+          <div className="view-switch" aria-label="页面">
+            <button aria-pressed={view === "gallery"} type="button" onClick={() => setView("gallery")}>
+              画廊
+            </button>
+            <button aria-pressed={view === "edit"} type="button" onClick={() => setView("edit")}>
+              图片编辑
+            </button>
+          </div>
           <button
             className="ghost-button"
             disabled={isRefreshing}
@@ -379,77 +481,160 @@ function App() {
       {notice ? <div className="notice">{notice}</div> : null}
       {error ? <div className="error-banner">{error}</div> : null}
 
-      <section className="gallery" aria-label="任务画廊">
-        {isLoading ? <GallerySkeleton /> : null}
-        {!isLoading && tasks.length === 0 ? <EmptyState onConfigure={openConfig} /> : null}
-        {!isLoading &&
-          tasks.map((task) => (
-            <TaskCard
-              isDeleting={deletingTaskId === task.id}
-              isRefreshing={isRefreshing}
-              key={task.id}
-              onDelete={() => requestDeleteTask(task)}
-              onEdit={() => void addTaskResultAsReference(task)}
-              onPreview={(preview) => setImagePreview(preview)}
-              onRefresh={() => void refreshTasks({ showLoading: true })}
-              task={task}
-              workerUrl={config.workerUrl}
-            />
-          ))}
-      </section>
+      {view === "gallery" ? (
+        <>
+          <section className="gallery" aria-label="任务画廊">
+            {isLoading ? <GallerySkeleton /> : null}
+            {!isLoading && tasks.length === 0 ? <EmptyState onConfigure={openConfig} /> : null}
+            {!isLoading &&
+              tasks.map((task) => (
+                <TaskCard
+                  isDeleting={deletingTaskId === task.id}
+                  isRefreshing={isRefreshing}
+                  key={task.id}
+                  onDelete={() => requestDeleteTask(task)}
+                  onEdit={() => void addTaskResultToEditor(task)}
+                  onPreview={(preview) => setImagePreview(preview)}
+                  onRefresh={() => void refreshTasks({ showLoading: true })}
+                  task={task}
+                  workerUrl={config.workerUrl}
+                />
+              ))}
+          </section>
 
-      <form className="composer" onSubmit={(event) => void submitTask(event)}>
-        {referenceImages.length > 0 ? (
-          <div className="reference-strip" aria-label="参考图">
-            {referenceImages.map((image, index) => (
-              <div className="reference-thumb" key={image.id}>
-                <img src={image.dataUrl} alt={`参考图 ${index + 1}`} />
-                <button type="button" onClick={() => removeReferenceImage(image.id)} aria-label={`移除参考图 ${index + 1}`}>
-                  <X size={13} strokeWidth={2.3} aria-hidden="true" />
+          <form className="composer" onSubmit={(event) => void submitTask(event)}>
+            {referenceImages.length > 0 ? (
+              <ReferenceStrip images={referenceImages} label="参考图" onRemove={removeReferenceImage} />
+            ) : null}
+            <textarea
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              placeholder={referenceImages.length > 0 ? "描述你想如何修改参考图" : "描述你想生成的图片"}
+              rows={4}
+            />
+            <div className="composer-controls">
+              <input
+                accept="image/*"
+                multiple
+                onChange={handleReferenceFileChange}
+                ref={referenceFileInputRef}
+                type="file"
+              />
+              <button
+                className="image-config-trigger"
+                disabled={isSubmitting || referenceImages.length >= MAX_REFERENCE_IMAGES}
+                type="button"
+                onClick={() => referenceFileInputRef.current?.click()}
+                aria-label="添加参考图"
+              >
+                <ImagePlus size={16} strokeWidth={2} aria-hidden="true" />
+                <strong>参考图 {referenceImages.length}</strong>
+              </button>
+              <ImageConfigButton config={imageConfig} disabled={isSubmitting} onClick={openImageConfig} />
+              <button className="primary-button" type="submit" disabled={isSubmitting}>
+                {isSubmitting ? "提交中" : "生成"}
+              </button>
+            </div>
+          </form>
+        </>
+      ) : (
+        <section className="edit-page" aria-label="图片编辑">
+          <div className="edit-workbench">
+            <div className="edit-canvas-panel">
+              {editMaskTarget ? (
+                <div className="edit-preview-frame">
+                  <img src={editMaskTarget.dataUrl} alt="编辑主图" />
+                  {maskDraft ? (
+                    <img className="mask-preview-overlay" src={maskDraft.previewDataUrl} alt="" aria-hidden="true" />
+                  ) : null}
+                </div>
+              ) : (
+                <div className="edit-dropzone">
+                  <ImagePlus size={34} strokeWidth={1.8} aria-hidden="true" />
+                  <p>添加图片后开始编辑</p>
+                </div>
+              )}
+            </div>
+
+            <form className="edit-panel" onSubmit={(event) => void submitEditTask(event)}>
+              <div className="panel-heading">
+                <h2>图片编辑</h2>
+                <button
+                  className="ghost-button"
+                  disabled={isSubmitting || editImages.length >= MAX_REFERENCE_IMAGES}
+                  type="button"
+                  onClick={() => editFileInputRef.current?.click()}
+                >
+                  添加图片
+                </button>
+                <input accept="image/*" multiple onChange={handleEditFileChange} ref={editFileInputRef} type="file" />
+              </div>
+
+              <div className="mode-switch" aria-label="编辑方式">
+                <button aria-pressed={editMode === "global"} type="button" onClick={() => setEditMode("global")}>
+                  整体编辑
+                </button>
+                <button aria-pressed={editMode === "masked"} type="button" onClick={() => setEditMode("masked")}>
+                  局部编辑
                 </button>
               </div>
-            ))}
+
+              {editImages.length > 0 ? (
+                <ReferenceStrip images={editImages} label="编辑图片" onRemove={removeEditImage} />
+              ) : null}
+
+              <div className="mask-controls">
+                <button
+                  className="image-config-trigger"
+                  disabled={editImages.length === 0 || isSubmitting}
+                  type="button"
+                  onClick={() => {
+                    const target = editMaskTarget;
+                    if (target) {
+                      setEditMode("masked");
+                      setMaskEditor({ image: target, existingMask: maskDraft });
+                    }
+                  }}
+                >
+                  <Brush size={16} strokeWidth={2} aria-hidden="true" />
+                  <strong>{maskDraft ? `遮罩 ${(maskDraft.coverage * 100).toFixed(0)}%` : "绘制遮罩"}</strong>
+                </button>
+                {maskDraft ? (
+                  <button className="ghost-button" disabled={isSubmitting} type="button" onClick={() => setMaskDraft(null)}>
+                    清除遮罩
+                  </button>
+                ) : null}
+                <ImageConfigButton config={imageConfig} disabled={isSubmitting} onClick={openImageConfig} />
+              </div>
+
+              <textarea
+                value={editPrompt}
+                onChange={(event) => setEditPrompt(event.target.value)}
+                placeholder={editMode === "masked" ? "描述涂抹区域要变成什么" : "描述整张图片需要如何调整"}
+                rows={7}
+              />
+
+              <div className="modal-actions">
+                <button
+                  className="ghost-button"
+                  disabled={isSubmitting}
+                  type="button"
+                  onClick={() => {
+                    setEditPrompt("");
+                    setEditImages([]);
+                    setMaskDraft(null);
+                  }}
+                >
+                  清空
+                </button>
+                <button className="primary-button" disabled={isSubmitting} type="submit">
+                  {isSubmitting ? "提交中" : editMode === "masked" ? "提交局部编辑" : "提交整体编辑"}
+                </button>
+              </div>
+            </form>
           </div>
-        ) : null}
-        <textarea
-          value={prompt}
-          onChange={(event) => setPrompt(event.target.value)}
-          placeholder={referenceImages.length > 0 ? "描述你想如何修改参考图" : "描述你想生成的图片"}
-          rows={4}
-        />
-        <div className="composer-controls">
-          <input
-            accept="image/*"
-            multiple
-            onChange={handleReferenceFileChange}
-            ref={referenceFileInputRef}
-            type="file"
-          />
-          <button
-            className="image-config-trigger"
-            disabled={isSubmitting || referenceImages.length >= MAX_REFERENCE_IMAGES}
-            type="button"
-            onClick={() => referenceFileInputRef.current?.click()}
-            aria-label="添加参考图"
-          >
-            <ImagePlus size={16} strokeWidth={2} aria-hidden="true" />
-            <strong>参考图 {referenceImages.length}</strong>
-          </button>
-          <button
-            className="image-config-trigger"
-            disabled={isSubmitting}
-            type="button"
-            onClick={openImageConfig}
-            aria-label={`图片配置，当前分辨率 ${resolveImageSize(imageConfig)}`}
-          >
-            <SlidersHorizontal size={16} strokeWidth={2} aria-hidden="true" />
-            <strong>{imageConfigButtonText(imageConfig)}</strong>
-          </button>
-          <button className="primary-button" type="submit" disabled={isSubmitting}>
-            {isSubmitting ? "提交中" : "生成"}
-          </button>
-        </div>
-      </form>
+        </section>
+      )}
 
       {isImageConfigOpen ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={() => setIsImageConfigOpen(false)}>
@@ -476,9 +661,7 @@ function App() {
                     aria-pressed={draftImageConfig.aspectRatio === option.value}
                     className="option-button"
                     key={option.value}
-                    onClick={() =>
-                      setDraftImageConfig((current) => ({ ...current, aspectRatio: option.value }))
-                    }
+                    onClick={() => setDraftImageConfig((current) => ({ ...current, aspectRatio: option.value }))}
                     type="button"
                   >
                     <span>{option.label}</span>
@@ -496,9 +679,7 @@ function App() {
                     aria-pressed={draftImageConfig.resolution === option.value}
                     className="option-button"
                     key={option.value}
-                    onClick={() =>
-                      setDraftImageConfig((current) => ({ ...current, resolution: option.value }))
-                    }
+                    onClick={() => setDraftImageConfig((current) => ({ ...current, resolution: option.value }))}
                     type="button"
                   >
                     <span>{option.label}</span>
@@ -652,12 +833,7 @@ function App() {
 
       {imagePreview ? (
         <div className="preview-backdrop" role="presentation" onMouseDown={() => setImagePreview(null)}>
-          <div
-            aria-label="查看图片"
-            aria-modal="true"
-            className="preview-modal"
-            role="dialog"
-          >
+          <div aria-label="查看图片" aria-modal="true" className="preview-modal" role="dialog">
             <button className="preview-close" type="button" onClick={() => setImagePreview(null)} aria-label="关闭预览">
               <X size={22} strokeWidth={2.2} aria-hidden="true" />
             </button>
@@ -671,7 +847,278 @@ function App() {
           </div>
         </div>
       ) : null}
+
+      {maskEditor ? (
+        <MaskEditorModal
+          image={maskEditor.image}
+          initialMask={maskEditor.existingMask?.dataUrl ?? null}
+          onCancel={() => setMaskEditor(null)}
+          onSave={(draft) => {
+            setMaskDraft(draft);
+            setMaskEditor(null);
+          }}
+        />
+      ) : null}
     </main>
+  );
+}
+
+function ImageConfigButton({ config, disabled, onClick }: { config: ImageConfig; disabled: boolean; onClick: () => void }) {
+  return (
+    <button
+      className="image-config-trigger"
+      disabled={disabled}
+      type="button"
+      onClick={onClick}
+      aria-label={`图片配置，当前分辨率 ${resolveImageSize(config)}`}
+    >
+      <SlidersHorizontal size={16} strokeWidth={2} aria-hidden="true" />
+      <strong>{imageConfigButtonText(config)}</strong>
+    </button>
+  );
+}
+
+function ReferenceStrip({
+  images,
+  label,
+  onRemove
+}: {
+  images: ReferenceImage[];
+  label: string;
+  onRemove: (id: string) => void;
+}) {
+  return (
+    <div className="reference-strip" aria-label={label}>
+      {images.map((image, index) => (
+        <div className="reference-thumb" key={image.id}>
+          <img src={image.dataUrl} alt={`${label} ${index + 1}`} />
+          <button type="button" onClick={() => onRemove(image.id)} aria-label={`移除${label} ${index + 1}`}>
+            <X size={13} strokeWidth={2.3} aria-hidden="true" />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MaskEditorModal({
+  image,
+  initialMask,
+  onCancel,
+  onSave
+}: {
+  image: ReferenceImage;
+  initialMask: string | null;
+  onCancel: () => void;
+  onSave: (draft: MaskDraft) => void;
+}) {
+  const imageCanvasRef = useRef<HTMLCanvasElement>(null);
+  const maskCanvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  const isDrawingRef = useRef(false);
+  const lastPointRef = useRef<{ x: number; y: number } | null>(null);
+  const [tool, setTool] = useState<MaskTool>("brush");
+  const [brushSize, setBrushSize] = useState(72);
+  const [coverage, setCoverage] = useState(0);
+  const [isReady, setIsReady] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function prepare() {
+      try {
+        const sourceImage = await loadImage(image.dataUrl);
+        if (cancelled) return;
+        const width = sourceImage.naturalWidth;
+        const height = sourceImage.naturalHeight;
+        for (const canvas of [imageCanvasRef.current, maskCanvasRef.current, overlayCanvasRef.current]) {
+          if (!canvas) throw new Error("当前浏览器不支持 Canvas");
+          canvas.width = width;
+          canvas.height = height;
+        }
+
+        const imageCtx = requiredContext(imageCanvasRef.current);
+        imageCtx.clearRect(0, 0, width, height);
+        imageCtx.drawImage(sourceImage, 0, 0, width, height);
+
+        const maskCtx = requiredContext(maskCanvasRef.current);
+        maskCtx.clearRect(0, 0, width, height);
+        maskCtx.fillStyle = "#ffffff";
+        maskCtx.fillRect(0, 0, width, height);
+
+        if (initialMask) {
+          const maskImage = await loadImage(initialMask);
+          if (cancelled) return;
+          maskCtx.drawImage(maskImage, 0, 0, width, height);
+        }
+
+        renderMaskOverlay();
+        setCoverage(calculateMaskCoverage(maskCanvasRef.current));
+        setIsReady(true);
+      } catch (loadError) {
+        if (!cancelled) setError(errorMessage(loadError));
+      }
+    }
+
+    void prepare();
+    return () => {
+      cancelled = true;
+    };
+  }, [image.dataUrl, initialMask]);
+
+  function renderMaskOverlay() {
+    const maskCanvas = maskCanvasRef.current;
+    const overlayCanvas = overlayCanvasRef.current;
+    if (!maskCanvas || !overlayCanvas) return;
+    const maskCtx = requiredContext(maskCanvas);
+    const overlayCtx = requiredContext(overlayCanvas);
+    const maskData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+    const overlayData = overlayCtx.createImageData(maskCanvas.width, maskCanvas.height);
+    for (let i = 0; i < maskData.data.length; i += 4) {
+      const alpha = maskData.data[i + 3];
+      if (alpha < 250) {
+        overlayData.data[i] = 27;
+        overlayData.data[i + 1] = 124;
+        overlayData.data[i + 2] = 171;
+        overlayData.data[i + 3] = 132;
+      }
+    }
+    overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    overlayCtx.putImageData(overlayData, 0, 0);
+  }
+
+  function getPoint(event: ReactPointerEvent<HTMLCanvasElement>) {
+    const canvas = overlayCanvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: ((event.clientX - rect.left) / rect.width) * canvas.width,
+      y: ((event.clientY - rect.top) / rect.height) * canvas.height
+    };
+  }
+
+  function drawTo(point: { x: number; y: number }) {
+    const canvas = maskCanvasRef.current;
+    if (!canvas) return;
+    const ctx = requiredContext(canvas);
+    const previous = lastPointRef.current ?? point;
+    ctx.save();
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = brushSize;
+    if (tool === "brush") {
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.strokeStyle = "rgba(0,0,0,1)";
+    } else {
+      ctx.globalCompositeOperation = "source-over";
+      ctx.strokeStyle = "#ffffff";
+    }
+    ctx.beginPath();
+    ctx.moveTo(previous.x, previous.y);
+    ctx.lineTo(point.x, point.y);
+    ctx.stroke();
+    ctx.restore();
+    lastPointRef.current = point;
+    renderMaskOverlay();
+  }
+
+  function endStroke() {
+    if (!isDrawingRef.current) return;
+    isDrawingRef.current = false;
+    lastPointRef.current = null;
+    setCoverage(calculateMaskCoverage(maskCanvasRef.current));
+  }
+
+  function clearMask() {
+    const canvas = maskCanvasRef.current;
+    if (!canvas) return;
+    const ctx = requiredContext(canvas);
+    ctx.globalCompositeOperation = "source-over";
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    renderMaskOverlay();
+    setCoverage(0);
+  }
+
+  function saveMask() {
+    const canvas = maskCanvasRef.current;
+    if (!canvas) return;
+    const nextCoverage = calculateMaskCoverage(canvas);
+    if (nextCoverage <= 0) {
+      setError("请先涂抹需要编辑的区域");
+      return;
+    }
+    onSave({
+      targetImageId: image.id,
+      dataUrl: canvas.toDataURL("image/png"),
+      previewDataUrl: overlayCanvasRef.current?.toDataURL("image/png") ?? canvas.toDataURL("image/png"),
+      coverage: nextCoverage
+    });
+  }
+
+  return (
+    <div className="preview-backdrop mask-backdrop" role="presentation" onMouseDown={onCancel}>
+      <div className="mask-editor" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="mask-toolbar">
+          <div className="mode-switch">
+            <button aria-pressed={tool === "brush"} type="button" onClick={() => setTool("brush")}>
+              <Brush size={16} aria-hidden="true" />
+              涂抹
+            </button>
+            <button aria-pressed={tool === "eraser"} type="button" onClick={() => setTool("eraser")}>
+              <Eraser size={16} aria-hidden="true" />
+              擦除
+            </button>
+          </div>
+          <label className="brush-size">
+            画笔
+            <input
+              max={180}
+              min={16}
+              onChange={(event) => setBrushSize(Number(event.target.value))}
+              type="range"
+              value={brushSize}
+            />
+          </label>
+          <span className="mask-coverage">区域 {(coverage * 100).toFixed(0)}%</span>
+          <button className="ghost-button" type="button" onClick={clearMask}>
+            清空
+          </button>
+          <button className="ghost-button" type="button" onClick={onCancel}>
+            取消
+          </button>
+          <button className="primary-button" disabled={!isReady} type="button" onClick={saveMask}>
+            保存遮罩
+          </button>
+        </div>
+        {error ? <div className="error-banner">{error}</div> : null}
+        <div className="mask-stage">
+          <canvas ref={imageCanvasRef} aria-hidden="true" />
+          <canvas ref={maskCanvasRef} aria-hidden="true" hidden />
+          <canvas
+            ref={overlayCanvasRef}
+            onPointerDown={(event) => {
+              const point = getPoint(event);
+              if (!point) return;
+              event.currentTarget.setPointerCapture(event.pointerId);
+              isDrawingRef.current = true;
+              lastPointRef.current = point;
+              drawTo(point);
+            }}
+            onPointerMove={(event) => {
+              if (!isDrawingRef.current) return;
+              const point = getPoint(event);
+              if (point) drawTo(point);
+            }}
+            onPointerCancel={endStroke}
+            onPointerLeave={endStroke}
+            onPointerUp={endStroke}
+            aria-label="遮罩绘制区域"
+          />
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -826,11 +1273,27 @@ function qualityLabel(quality: ImageQuality): string {
   return text[quality];
 }
 
+function toPayload(image: ReferenceImage): ReferenceImagePayload {
+  return {
+    dataUrl: image.dataUrl,
+    filename: image.filename
+  };
+}
+
+function orderImagesForMask(images: ReferenceImage[], maskTargetImageId: string | null | undefined): ReferenceImage[] {
+  if (!maskTargetImageId) return images;
+  const index = images.findIndex((image) => image.id === maskTargetImageId);
+  if (index <= 0) return images;
+  const nextImages = [...images];
+  const [target] = nextImages.splice(index, 1);
+  return [target, ...nextImages];
+}
+
 function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(reader.error ?? new Error("参考图读取失败"));
+    reader.onerror = () => reject(reader.error ?? new Error("图片读取失败"));
     reader.readAsDataURL(file);
   });
 }
@@ -838,7 +1301,7 @@ function fileToDataUrl(file: File): Promise<string> {
 async function fetchImageAsDataUrl(url: string): Promise<string> {
   const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(`参考图读取失败：${response.status}`);
+    throw new Error(`图片读取失败：${response.status}`);
   }
 
   const blob = await response.blob();
@@ -847,6 +1310,32 @@ async function fetchImageAsDataUrl(url: string): Promise<string> {
   }
 
   return fileToDataUrl(new File([blob], "reference.png", { type: blob.type }));
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("图片加载失败"));
+    image.src = src;
+  });
+}
+
+function requiredContext(canvas: HTMLCanvasElement | null): CanvasRenderingContext2D {
+  const context = canvas?.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("当前浏览器不支持 Canvas");
+  return context;
+}
+
+function calculateMaskCoverage(canvas: HTMLCanvasElement | null): number {
+  if (!canvas) return 0;
+  const context = requiredContext(canvas);
+  const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  let transparent = 0;
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] < 250) transparent += 1;
+  }
+  return transparent / (canvas.width * canvas.height);
 }
 
 function shortUuid(value: string): string {

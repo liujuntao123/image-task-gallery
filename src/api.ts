@@ -6,6 +6,7 @@ interface CreateImageTaskInput {
   size: string;
   quality: "low" | "medium" | "high";
   inputImages: ReferenceImagePayload[];
+  mask?: ReferenceImagePayload | null;
   uuid: string;
   config: AppConfig;
 }
@@ -46,6 +47,7 @@ export async function createImageTask(input: CreateImageTaskInput): Promise<Crea
       key: input.config.apiKey,
       payload,
       inputImages: input.inputImages,
+      ...(input.mask ? { mask: input.mask } : {}),
       uuid: input.uuid,
       maxAttempts: 1
     })
