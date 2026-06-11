@@ -28,9 +28,20 @@ http://127.0.0.1:5174/
 ## Checks
 
 ```bash
-npm run lint
-npm run build
+npm run check
 ```
+
+`check` runs linting and the production build.
+
+## Project Structure
+
+- `src/App.tsx`: authenticated app shell and page-level orchestration.
+- `src/api.ts`: Worker API client and authenticated image fetching.
+- `src/appTypes.ts`: UI-specific types shared by components.
+- `src/imageOptions.ts`: image size, ratio, resolution, and quality options.
+- `src/utils.ts`: browser/image helpers and task formatting utilities.
+- `src/components/TaskCard.tsx`: task card rendering and result-image blob URL lifecycle.
+- `src/components/MaskEditorModal.tsx`: canvas-based local mask editor.
 
 ## Defaults
 
