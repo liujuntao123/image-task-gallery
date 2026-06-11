@@ -1,16 +1,10 @@
 export type TaskStatus = "queued" | "running" | "succeeded" | "failed";
 
-export interface AppConfig {
-  workerUrl: string;
-  imageType: "gpt-image-2";
-  targetUrl: string;
-  apiKey: string;
-  model: string;
-}
-
 export interface ImageTask {
   id: string;
   uuid: string;
+  ownerType?: "user";
+  userId?: string;
   status: TaskStatus;
   targetUrl: string;
   apiKeyHint: string | null;

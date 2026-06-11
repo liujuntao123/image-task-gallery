@@ -4,10 +4,10 @@ Frontend companion for `image-task-worker`.
 
 ## Features
 
-- Gallery homepage for the current browser/device UUID.
+- Clerk login with per-user task ownership.
 - Floating prompt composer with image configuration summary and modal controls for aspect ratio and resolution.
-- Configuration modal for `imageType`, Worker URL, target image API URL, key, and model.
-- Browser-local device UUID and configuration persistence.
+- Fixed Worker API endpoint from Vite env/defaults.
+- Image API URL, key, and model stay server-side in the Worker.
 - Real task creation through the deployed Worker.
 - Automatic task polling, status display, error display, and image open/download links.
 
@@ -15,6 +15,7 @@ Frontend companion for `image-task-worker`.
 
 ```bash
 npm install
+cp .env.example .env.local
 npm run dev -- --host 127.0.0.1 --port 5174
 ```
 
@@ -34,7 +35,10 @@ npm run build
 ## Defaults
 
 - Worker URL: `https://image-task-worker.royal-silence-b1e6.workers.dev`
-- Target API URL: `https://sub.aizhi.site/v1/images/generations`
-- Image type/model: `gpt-image-2`
 
-The API key is intentionally empty by default and must be set in the configuration modal.
+Required env:
+
+- `VITE_CLERK_PUBLISHABLE_KEY`: Clerk publishable key for the frontend app.
+- `VITE_WORKER_URL`: optional Worker URL override. If omitted, the deployed default above is used.
+
+The frontend no longer accepts Worker URL, target image API URL, API key, or model from users. Task ownership is derived from the Clerk session token by the Worker.

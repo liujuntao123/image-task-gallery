@@ -1,20 +1,21 @@
-import type { AppConfig, CreateTaskResponse, ImageTask, ReferenceImagePayload, TaskListResponse } from "./types";
-import { trimTrailingSlash } from "./storage";
+import type { CreateTaskResponse, ImageTask, ReferenceImagePayload, TaskListResponse } from "./types";
+import { trimTrailingSlash } from "./config";
 
 interface CreateImageTaskInput {
+  workerUrl: string;
+  token: string;
   prompt: string;
   size: string;
   quality: "low" | "medium" | "high";
   inputImages: ReferenceImagePayload[];
   mask?: ReferenceImagePayload | null;
-  uuid: string;
-  config: AppConfig;
 }
 
-export async function listTasks(workerUrl: string, uuid: string): Promise<ImageTask[]> {
+export async function listTasks(workerUrl: string, token: string): Promise<ImageTask[]> {
   const baseUrl = trimTrailingSlash(workerUrl);
-  const response = await fetch(`${baseUrl}/tasks?uuid=${encodeURIComponent(uuid)}&limit=80`, {
+  const response = await fetch(`${baseUrl}/tasks?limit=80`, {
     headers: {
+      Authorization: `Bearer ${token}`,
       Accept: "application/json"
     }
   });
@@ -28,9 +29,8 @@ export async function listTasks(workerUrl: string, uuid: string): Promise<ImageT
 }
 
 export async function createImageTask(input: CreateImageTaskInput): Promise<CreateTaskResponse> {
-  const baseUrl = trimTrailingSlash(input.config.workerUrl);
+  const baseUrl = trimTrailingSlash(input.workerUrl);
   const payload = {
-    model: input.config.model,
     prompt: input.prompt,
     size: input.size,
     quality: input.quality
@@ -39,16 +39,14 @@ export async function createImageTask(input: CreateImageTaskInput): Promise<Crea
   const response = await fetch(`${baseUrl}/tasks`, {
     method: "POST",
     headers: {
+      Authorization: `Bearer ${input.token}`,
       "Content-Type": "application/json",
       Accept: "application/json"
     },
     body: JSON.stringify({
-      url: input.config.targetUrl,
-      key: input.config.apiKey,
       payload,
       inputImages: input.inputImages,
       ...(input.mask ? { mask: input.mask } : {}),
-      uuid: input.uuid,
       maxAttempts: 1
     })
   });
@@ -60,11 +58,12 @@ export async function createImageTask(input: CreateImageTaskInput): Promise<Crea
   return (await response.json()) as CreateTaskResponse;
 }
 
-export async function deleteImageTask(workerUrl: string, taskId: string, uuid: string): Promise<void> {
+export async function deleteImageTask(workerUrl: string, token: string, taskId: string): Promise<void> {
   const baseUrl = trimTrailingSlash(workerUrl);
-  const response = await fetch(`${baseUrl}/tasks/${encodeURIComponent(taskId)}?uuid=${encodeURIComponent(uuid)}`, {
+  const response = await fetch(`${baseUrl}/tasks/${encodeURIComponent(taskId)}`, {
     method: "DELETE",
     headers: {
+      Authorization: `Bearer ${token}`,
       Accept: "application/json"
     }
   });
@@ -80,6 +79,36 @@ export function resolveImageUrl(workerUrl: string, resultUrl: string): string {
   }
 
   return `${trimTrailingSlash(workerUrl)}${resultUrl.startsWith("/") ? "" : "/"}${resultUrl}`;
+}
+
+export async function fetchImageBlobUrl(workerUrl: string, token: string, resultUrl: string): Promise<string> {
+  const url = resolveImageUrl(workerUrl, resultUrl);
+  const response = await fetch(url, {
+    headers: shouldSendWorkerAuth(workerUrl, resultUrl) ? { Authorization: `Bearer ${token}` } : undefined
+  });
+
+  if (!response.ok) {
+    throw new Error(`图片读取失败：${response.status} ${await safeText(response)}`);
+  }
+
+  const blob = await response.blob();
+  if (!blob.type.startsWith("image/")) {
+    throw new Error("结果不是可用图片");
+  }
+
+  return URL.createObjectURL(blob);
+}
+
+function shouldSendWorkerAuth(workerUrl: string, resultUrl: string): boolean {
+  if (!resultUrl.startsWith("http://") && !resultUrl.startsWith("https://")) {
+    return true;
+  }
+
+  try {
+    return new URL(resultUrl).origin === new URL(workerUrl).origin;
+  } catch {
+    return true;
+  }
 }
 
 async function safeText(response: Response): Promise<string> {

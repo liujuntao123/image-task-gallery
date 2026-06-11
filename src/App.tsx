@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent, PointerEvent as ReactPointerEvent } from "react";
+import { SignInButton, SignedIn, SignedOut, UserButton, useAuth, useUser } from "@clerk/clerk-react";
 import { Brush, Eraser, ImagePlus, SlidersHorizontal, X } from "lucide-react";
 import "./App.css";
-import { createImageTask, deleteImageTask, listTasks, resolveImageUrl } from "./api";
-import { DEFAULT_CONFIG, getDeviceUuid, loadConfig, saveConfig } from "./storage";
-import type { AppConfig, ImageTask, ReferenceImagePayload, TaskStatus } from "./types";
+import { createImageTask, deleteImageTask, fetchImageBlobUrl, listTasks } from "./api";
+import { WORKER_URL } from "./config";
+import type { ImageTask, ReferenceImagePayload, TaskStatus } from "./types";
 
 type AppView = "gallery" | "edit";
 type EditMode = "global" | "masked";
@@ -97,10 +98,46 @@ const TASK_CREATED_NOTICE = "任务已创建，正在生成";
 const TASK_CREATED_NOTICE_TIMEOUT_MS = 3500;
 
 function App() {
-  const [deviceUuid] = useState(() => getDeviceUuid());
-  const [config, setConfig] = useState<AppConfig>(() => loadConfig());
-  const [draftConfig, setDraftConfig] = useState<AppConfig>(() => loadConfig());
-  const [isConfigOpen, setIsConfigOpen] = useState(false);
+  return (
+    <>
+      <SignedOut>
+        <SignedOutLanding />
+      </SignedOut>
+      <SignedIn>
+        <AuthenticatedApp />
+      </SignedIn>
+    </>
+  );
+}
+
+function SignedOutLanding() {
+  return (
+    <main className="auth-shell">
+      <section className="auth-panel">
+        <div className="brand">
+          <div className="brand-mark">IG</div>
+          <div>
+            <h1>Image Gallery</h1>
+            <p>登录后查看你的生成任务</p>
+          </div>
+        </div>
+        <div className="auth-copy">
+          <h2>你的图片任务会绑定到 Clerk 用户</h2>
+          <p>登录后即可创建、查看、编辑和删除自己的任务；生成接口和上游密钥由 Worker 统一管理。</p>
+        </div>
+        <SignInButton mode="modal">
+          <button className="primary-button" type="button">
+            登录
+          </button>
+        </SignInButton>
+      </section>
+    </main>
+  );
+}
+
+function AuthenticatedApp() {
+  const { getToken, userId } = useAuth();
+  const { user } = useUser();
   const [view, setView] = useState<AppView>("gallery");
   const [imageConfig, setImageConfig] = useState<ImageConfig>(DEFAULT_IMAGE_CONFIG);
   const [draftImageConfig, setDraftImageConfig] = useState<ImageConfig>(DEFAULT_IMAGE_CONFIG);
@@ -127,6 +164,21 @@ function App() {
 
   const hasActiveTasks = useMemo(() => tasks.some((task) => ACTIVE_STATUSES.includes(task.status)), [tasks]);
   const editMaskTarget = editImages.find((image) => image.id === maskDraft?.targetImageId) ?? editImages[0] ?? null;
+  const userLabel = user?.primaryEmailAddress?.emailAddress ?? user?.fullName ?? userId ?? "已登录";
+
+  const requireToken = useCallback(async () => {
+    const token = await getToken();
+    if (!token) throw new Error("登录状态已失效，请重新登录");
+    return token;
+  }, [getToken]);
+
+  const getTaskImageUrl = useCallback(
+    async (resultUrl: string) => {
+      const token = await requireToken();
+      return fetchImageBlobUrl(WORKER_URL, token, resultUrl);
+    },
+    [requireToken]
+  );
 
   const refreshTasks = useCallback(
     async (options: { showLoading?: boolean } = {}) => {
@@ -136,7 +188,8 @@ function App() {
       if (options.showLoading) setIsRefreshing(true);
 
       try {
-        const nextTasks = await listTasks(config.workerUrl, deviceUuid);
+        const token = await requireToken();
+        const nextTasks = await listTasks(WORKER_URL, token);
         setTasks(nextTasks);
         setError(null);
       } catch (refreshError) {
@@ -147,7 +200,7 @@ function App() {
         isTaskListRequestInFlight.current = false;
       }
     },
-    [config.workerUrl, deviceUuid]
+    [requireToken]
   );
 
   useEffect(() => {
@@ -155,7 +208,8 @@ function App() {
     async function loadInitialTasks() {
       setIsLoading(true);
       try {
-        const initialTasks = await listTasks(config.workerUrl, deviceUuid);
+        const token = await requireToken();
+        const initialTasks = await listTasks(WORKER_URL, token);
         if (!isMounted) return;
         setTasks(initialTasks);
         setError(null);
@@ -171,7 +225,7 @@ function App() {
     return () => {
       isMounted = false;
     };
-  }, [config.workerUrl, deviceUuid]);
+  }, [requireToken]);
 
   useEffect(() => {
     const intervalMs = hasActiveTasks ? 3000 : 12000;
@@ -211,11 +265,6 @@ function App() {
     };
   }, [imagePreview, maskEditor]);
 
-  function openConfig() {
-    setDraftConfig(config);
-    setIsConfigOpen(true);
-  }
-
   function openImageConfig() {
     setDraftImageConfig(imageConfig);
     setIsImageConfigOpen(true);
@@ -227,28 +276,11 @@ function App() {
     setIsImageConfigOpen(false);
   }
 
-  function submitConfig(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const nextConfig = {
-      ...draftConfig,
-      imageType: "gpt-image-2" as const,
-      workerUrl: draftConfig.workerUrl.trim(),
-      targetUrl: draftConfig.targetUrl.trim(),
-      apiKey: draftConfig.apiKey.trim(),
-      model: draftConfig.model.trim() || "gpt-image-2"
-    };
-    saveConfig(nextConfig);
-    setConfig(nextConfig);
-    setIsConfigOpen(false);
-    setNotice("配置已保存");
-  }
-
   async function submitTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (isSubmitting) return;
 
     const finalPrompt = prompt.trim();
-    if (!ensureConfigured()) return;
     if (!finalPrompt) {
       setError("请输入提示词");
       return;
@@ -259,13 +291,14 @@ function App() {
     setNotice(null);
 
     try {
+      const token = await requireToken();
       await createImageTask({
+        workerUrl: WORKER_URL,
+        token,
         prompt: finalPrompt,
         size: resolveImageSize(imageConfig),
         quality: imageConfig.quality,
-        inputImages: referenceImages.map(toPayload),
-        uuid: deviceUuid,
-        config
+        inputImages: referenceImages.map(toPayload)
       });
       setPrompt("");
       setReferenceImages([]);
@@ -283,7 +316,6 @@ function App() {
     if (isSubmitting) return;
 
     const finalPrompt = editPrompt.trim();
-    if (!ensureConfigured()) return;
     if (editImages.length === 0) {
       setError("请先添加要编辑的图片");
       return;
@@ -302,15 +334,16 @@ function App() {
     setNotice(null);
 
     try {
+      const token = await requireToken();
       const orderedImages = orderImagesForMask(editImages, editMode === "masked" ? maskDraft?.targetImageId : null);
       await createImageTask({
+        workerUrl: WORKER_URL,
+        token,
         prompt: finalPrompt,
         size: resolveImageSize(imageConfig),
         quality: imageConfig.quality,
         inputImages: orderedImages.map(toPayload),
-        mask: editMode === "masked" && maskDraft ? { dataUrl: maskDraft.dataUrl, filename: "mask.png" } : null,
-        uuid: deviceUuid,
-        config
+        mask: editMode === "masked" && maskDraft ? { dataUrl: maskDraft.dataUrl, filename: "mask.png" } : null
       });
       setEditPrompt("");
       setMaskDraft(null);
@@ -322,16 +355,6 @@ function App() {
     } finally {
       setIsSubmitting(false);
     }
-  }
-
-  function ensureConfigured(): boolean {
-    if (!config.apiKey) {
-      setNotice(null);
-      setError("请先在配置里填写 key");
-      setIsConfigOpen(true);
-      return false;
-    }
-    return true;
   }
 
   function requestDeleteTask(task: ImageTask) {
@@ -382,7 +405,7 @@ function App() {
   }
 
   async function addTaskResultToEditor(task: ImageTask) {
-    const resultUrl = task.resultUrls[0] ? resolveImageUrl(config.workerUrl, task.resultUrls[0]) : null;
+    const resultUrl = task.resultUrls[0] ?? null;
     if (!resultUrl) return;
     if (editImages.length >= MAX_REFERENCE_IMAGES) {
       setError(`最多添加 ${MAX_REFERENCE_IMAGES} 张图片`);
@@ -390,7 +413,13 @@ function App() {
     }
 
     try {
-      const dataUrl = await fetchImageAsDataUrl(resultUrl);
+      const objectUrl = await getTaskImageUrl(resultUrl);
+      let dataUrl = "";
+      try {
+        dataUrl = await fetchImageAsDataUrl(objectUrl);
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
       setEditImages((current) => [
         ...current,
         {
@@ -427,7 +456,8 @@ function App() {
     setNotice(null);
 
     try {
-      await deleteImageTask(config.workerUrl, task.id, deviceUuid);
+      const token = await requireToken();
+      await deleteImageTask(WORKER_URL, token, task.id);
       setTasks((currentTasks) => currentTasks.filter((currentTask) => currentTask.id !== task.id));
       setDeleteCandidate(null);
       setNotice("任务已删除");
@@ -445,7 +475,7 @@ function App() {
           <div className="brand-mark">IG</div>
           <div>
             <h1>Image Gallery</h1>
-            <p>设备任务：{shortUuid(deviceUuid)}</p>
+            <p>{userLabel}</p>
           </div>
         </div>
         <div className="topbar-actions">
@@ -465,15 +495,13 @@ function App() {
           >
             {isRefreshing ? "刷新中" : "刷新"}
           </button>
-          <button className="ghost-button" type="button" onClick={openConfig}>
-            配置
-          </button>
+          <UserButton />
         </div>
       </header>
 
       <section className="status-strip" aria-live="polite">
-        <span>接口：{compactUrl(config.targetUrl)}</span>
-        <span>模型：{config.model}</span>
+        <span>接口：{compactUrl(WORKER_URL)}</span>
+        <span>身份：Clerk 用户</span>
         <span>任务：{tasks.length}</span>
         <span>生成中：{tasks.filter((task) => ACTIVE_STATUSES.includes(task.status)).length}</span>
       </section>
@@ -485,7 +513,7 @@ function App() {
         <>
           <section className="gallery" aria-label="任务画廊">
             {isLoading ? <GallerySkeleton /> : null}
-            {!isLoading && tasks.length === 0 ? <EmptyState onConfigure={openConfig} /> : null}
+            {!isLoading && tasks.length === 0 ? <EmptyState /> : null}
             {!isLoading &&
               tasks.map((task) => (
                 <TaskCard
@@ -494,10 +522,10 @@ function App() {
                   key={task.id}
                   onDelete={() => requestDeleteTask(task)}
                   onEdit={() => void addTaskResultToEditor(task)}
+                  getImageUrl={getTaskImageUrl}
                   onPreview={(preview) => setImagePreview(preview)}
                   onRefresh={() => void refreshTasks({ showLoading: true })}
                   task={task}
-                  workerUrl={config.workerUrl}
                 />
               ))}
           </section>
@@ -709,74 +737,6 @@ function App() {
 
             <div className="modal-actions">
               <button type="button" className="ghost-button" onClick={() => setDraftImageConfig(DEFAULT_IMAGE_CONFIG)}>
-                恢复默认
-              </button>
-              <button type="submit" className="primary-button">
-                保存配置
-              </button>
-            </div>
-          </form>
-        </div>
-      ) : null}
-
-      {isConfigOpen ? (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setIsConfigOpen(false)}>
-          <form className="config-modal" onSubmit={submitConfig} onMouseDown={(event) => event.stopPropagation()}>
-            <div className="modal-title">
-              <div>
-                <h2>生成配置</h2>
-                <p>保存在当前浏览器，不会同步到服务端。</p>
-              </div>
-              <button type="button" className="ghost-button" onClick={() => setIsConfigOpen(false)}>
-                关闭
-              </button>
-            </div>
-
-            <label>
-              image 类型
-              <select
-                value={draftConfig.imageType}
-                onChange={() => setDraftConfig((current) => ({ ...current, imageType: "gpt-image-2" }))}
-              >
-                <option value="gpt-image-2">gpt-image-2</option>
-              </select>
-            </label>
-            <label>
-              Worker URL
-              <input
-                value={draftConfig.workerUrl}
-                onChange={(event) => setDraftConfig((current) => ({ ...current, workerUrl: event.target.value }))}
-                placeholder={DEFAULT_CONFIG.workerUrl}
-              />
-            </label>
-            <label>
-              URL
-              <input
-                value={draftConfig.targetUrl}
-                onChange={(event) => setDraftConfig((current) => ({ ...current, targetUrl: event.target.value }))}
-                placeholder="https://example.com/v1/images/generations"
-              />
-            </label>
-            <label>
-              key
-              <input
-                value={draftConfig.apiKey}
-                onChange={(event) => setDraftConfig((current) => ({ ...current, apiKey: event.target.value }))}
-                placeholder="sk-..."
-                type="password"
-              />
-            </label>
-            <label>
-              model
-              <input
-                value={draftConfig.model}
-                onChange={(event) => setDraftConfig((current) => ({ ...current, model: event.target.value }))}
-                placeholder="gpt-image-2"
-              />
-            </label>
-
-            <div className="modal-actions">
-              <button type="button" className="ghost-button" onClick={() => setDraftConfig(DEFAULT_CONFIG)}>
                 恢复默认
               </button>
               <button type="submit" className="primary-button">
@@ -1124,7 +1084,7 @@ function MaskEditorModal({
 
 interface TaskCardProps {
   task: ImageTask;
-  workerUrl: string;
+  getImageUrl: (resultUrl: string) => Promise<string>;
   isDeleting: boolean;
   isRefreshing: boolean;
   onDelete: () => void;
@@ -1133,9 +1093,39 @@ interface TaskCardProps {
   onRefresh: () => void;
 }
 
-function TaskCard({ task, workerUrl, isDeleting, isRefreshing, onDelete, onEdit, onPreview, onRefresh }: TaskCardProps) {
-  const firstImageUrl = task.resultUrls[0] ? resolveImageUrl(workerUrl, task.resultUrls[0]) : null;
+function TaskCard({ task, getImageUrl, isDeleting, isRefreshing, onDelete, onEdit, onPreview, onRefresh }: TaskCardProps) {
+  const firstResultUrl = task.resultUrls[0] ?? null;
+  const [imageState, setImageState] = useState<{ resultUrl: string; objectUrl: string | null; error: string | null } | null>(
+    null
+  );
+  const firstImageUrl = imageState?.resultUrl === firstResultUrl ? imageState.objectUrl : null;
+  const imageLoadError = imageState?.resultUrl === firstResultUrl ? imageState.error : null;
   const elapsed = formatElapsed(task.startedAt, task.completedAt ?? task.failedAt);
+
+  useEffect(() => {
+    let revokedUrl: string | null = null;
+    let cancelled = false;
+
+    if (!firstResultUrl) return undefined;
+
+    getImageUrl(firstResultUrl)
+      .then((url) => {
+        if (cancelled) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        revokedUrl = url;
+        setImageState({ resultUrl: firstResultUrl, objectUrl: url, error: null });
+      })
+      .catch((error) => {
+        if (!cancelled) setImageState({ resultUrl: firstResultUrl, objectUrl: null, error: errorMessage(error) });
+      });
+
+    return () => {
+      cancelled = true;
+      if (revokedUrl) URL.revokeObjectURL(revokedUrl);
+    };
+  }, [firstResultUrl, getImageUrl]);
 
   return (
     <article className={`task-card task-${task.status}`}>
@@ -1151,7 +1141,7 @@ function TaskCard({ task, workerUrl, isDeleting, isRefreshing, onDelete, onEdit,
           </button>
         ) : (
           <div className="placeholder">
-            <span>{statusText(task.status)}</span>
+            <span>{firstResultUrl && imageLoadError ? "图片读取失败" : statusText(task.status)}</span>
           </div>
         )}
         <span className={`status-pill ${task.status}`}>{statusText(task.status)}</span>
@@ -1164,6 +1154,7 @@ function TaskCard({ task, workerUrl, isDeleting, isRefreshing, onDelete, onEdit,
           <span>{elapsed}</span>
         </div>
         {task.error ? <p className="task-error">{task.error}</p> : null}
+        {imageLoadError ? <p className="task-error">{imageLoadError}</p> : null}
         <div className="task-actions">
           {firstImageUrl ? (
             <>
@@ -1208,14 +1199,11 @@ function GallerySkeleton() {
   );
 }
 
-function EmptyState({ onConfigure }: { onConfigure: () => void }) {
+function EmptyState() {
   return (
     <div className="empty-state">
       <h2>还没有任务</h2>
-      <p>先完成接口配置，然后在底部输入提示词创建第一张图片。</p>
-      <button className="primary-button" type="button" onClick={onConfigure}>
-        打开配置
-      </button>
+      <p>在底部输入提示词创建第一张图片。任务会自动归属到当前登录用户。</p>
     </div>
   );
 }
@@ -1336,10 +1324,6 @@ function calculateMaskCoverage(canvas: HTMLCanvasElement | null): number {
     if (data[i] < 250) transparent += 1;
   }
   return transparent / (canvas.width * canvas.height);
-}
-
-function shortUuid(value: string): string {
-  return value.length > 18 ? `${value.slice(0, 10)}...${value.slice(-6)}` : value;
 }
 
 function errorMessage(error: unknown): string {
